@@ -5,6 +5,8 @@ import redis  # pip install redis
 from typing import List, Dict, Tuple
 from seleniumbase import SB
 from bs4 import BeautifulSoup
+import mysql.connector
+import urllib.parse
 
 # ----------------------------
 # Settings
@@ -21,6 +23,26 @@ RANK_MOVE_THRESHOLD = int(os.getenv("RANK_MOVE_THRESHOLD", "999999"))  # start w
 TZ = pytz.timezone(os.getenv("TZ", "Asia/Colombo"))
 HEADLESS = True
 DEBUG = True
+
+DB_WRITE = True  # Set to False to disable DB writes (for testing)
+
+db_url = os.getenv("DB_URL")  # Set this in your .env file
+
+if not db_url:
+    raise RuntimeError("DB_URL environment variable is required")
+
+url = urllib.parse.urlparse(db_url)
+
+sqldb = mysql.connector.connect(
+    host=url.hostname,
+    port=url.port,
+    user=url.username,
+    password=url.password,
+    database=url.path.lstrip("/"),
+    ssl_disabled=False
+)
+
+sql_cursor = sqldb.cursor()
 
 def dprint(msg: str):
     if DEBUG:
@@ -85,15 +107,45 @@ def scrape_trending_topN(n: int) -> List[Dict]:
 
         # extract the token information
         contract = m.group(1)
+        contract = contract.lower()
         name = (row.select_one(".ds-dex-table-row-base-token-name-text") or {}).get_text(strip=True) if row.select_one(".ds-dex-table-row-base-token-name-text") else None
-        symbol = (row.select_one(".ds-dex-table-row-base-token-symbol-text") or {}).get_text(strip=True) if row.select_one(".ds-dex-table-row-base-token-symbol-text") else None
+        symbol = (row.select_one(".ds-dex-table-row-base-token-symbol") or {}).get_text(strip=True) if row.select_one(".ds-dex-table-row-base-token-symbol") else None
         mc_node = row.select_one(".ds-dex-table-row-col-market-cap")
         liq_node = row.select_one(".ds-dex-table-row-col-liquidity")
-        vol_node = row.select_one(".ds-dex-table-row-col-volume")
+        vol_node = row.select_one(".ds-dex-table-row-col-volume") 
         market_cap = mc_node.text.strip() if mc_node else ""
         liquidity  = liq_node.text.strip() if liq_node else ""
         volume     = vol_node.text.strip() if vol_node else ""
+        thumbnail  = (row.select_one("img.ds-dex-table-row-token-icon-img") or {}).get("src","") if row.select_one("img.ds-dex-table-row-token-icon-img") else ""
 
+        # store in DB
+        if DB_WRITE:
+            try:
+                sql_cursor.execute("""
+                    INSERT INTO tokens (contract, chain, name, symbol, market_cap, liquidity, volume, thumbnail)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        name=VALUES(name),
+                        symbol=VALUES(symbol),
+                        market_cap=VALUES(market_cap),
+                        liquidity=VALUES(liquidity),
+                        volume=VALUES(volume),
+                        thumbnail=VALUES(thumbnail)
+                """, (
+                    contract,
+                    CHAIN,
+                    name,
+                    symbol,
+                    parse_num(market_cap),
+                    parse_num(liquidity),
+                    parse_num(volume),
+                    thumbnail
+                ))
+                sqldb.commit()
+            except mysql.connector.Error as err:
+                dprint(f"Error inserting/updating token {contract}: {err}")
+
+        # append to output
         out.append({
             "chain": CHAIN,
             "contract": contract,
@@ -110,7 +162,7 @@ def scrape_trending_topN(n: int) -> List[Dict]:
         })
         rank += 1
 
-    dprint(f"Scraped {len(out)} tokens")
+    # dprint(f"Scraped {len(out)} tokens")
     return out
 
 def compute_diff(prev: List[Dict], curr: List[Dict], rank_move_threshold: int):
@@ -194,6 +246,27 @@ if __name__ == "__main__":
     if not r.exists(K_LATEST_VER):
         r.set(K_LATEST_VER, 0)
 
+    # initialize the SQL connection
+    try:
+        sql_cursor.execute("CREATE DATABASE IF NOT EXISTS solana_tokens")
+        sql_cursor.execute("USE solana_tokens")
+        sql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tokens (
+                contract VARCHAR(64) PRIMARY KEY,
+                chain VARCHAR(10),
+                name VARCHAR(255),
+                symbol VARCHAR(50),
+                market_cap DOUBLE,
+                liquidity DOUBLE,
+                volume DOUBLE,
+                thumbnail VARCHAR(255)
+            )
+                    """)
+        sqldb.commit()
+    except mysql.connector.Error as err:
+        dprint(f"Error initializing MySQL: {err}")
+        exit(1)
+
     while True:
         try:
             run_once()
@@ -201,4 +274,5 @@ if __name__ == "__main__":
             dprint(f"ERROR: {e}")
         # # small jitter
         # sleep_s = INTERVAL_SEC + random.randint(-5, 5)
-        time.sleep(60*5)
+        # time.sleep(60*5)
+        time.sleep(5)

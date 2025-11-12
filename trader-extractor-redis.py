@@ -10,6 +10,8 @@ from bs4 import BeautifulSoup
 from seleniumbase import SB
 import urllib.parse
 
+DB_WRITE = True  # Set to False to disable DB writes (for testing)
+
 db_url = os.getenv("DB_URL")  # Set this in your .env file
 
 if not db_url:
@@ -162,13 +164,13 @@ def _process_one_token(token_address: str):
                             # https://solscan.io/account/8Hw9X9UwBso7Sp2CFnEEeUGW8pGDj9wghc78ccWFZWpU get the last part of the href
                             wallet_address = href.split('/')[-1]
 
-                            # check wallet address already exists in the database, if yes -> skip
-                            sql_cursor.execute("SELECT COUNT(*) FROM traders WHERE wallet_address = %s", (wallet_address,))
-                            exists = sql_cursor.fetchone()[0] > 0
+                            # # check wallet address already exists in the database, if yes -> skip
+                            # sql_cursor.execute("SELECT COUNT(*) FROM traders WHERE wallet_address = %s", (wallet_address,))
+                            # exists = sql_cursor.fetchone()[0] > 0
 
-                            if exists:
-                                dprint(f"Wallet address {wallet_address} already exists in the database, skipping.")
-                                continue
+                            # if exists:
+                            #     dprint(f"Wallet address {wallet_address} already exists in the database, skipping.")
+                            #     continue
 
                             # get the trader's gross profit, win rate, wins, losses, etc.
                             target_url = f"https://dexcheck.ai/app/wallet-analyzer/{wallet_address}"
@@ -248,26 +250,21 @@ def _process_one_token(token_address: str):
                                 f"Realized Profit (%): {realized_profit_percent}, Unrealized Profit (%): {unrealized_profit_percent}, "
                                 f"Wins: {win_value}, Losses: {loss_value}, Trading Volume: {trade_volume_value}, "
                                 f"Trades: {trades_value}, Avg. Trade Size: {avg_trade_size_value} \n")
-                            
-                            # save to MySQL if already exists update the parameters
-                            sql_cursor.execute("""
-                                INSERT INTO traders (wallet_address, token_address, gross_profit, win_rate, realized_profit, unrealized_profit, realized_profit_percent, unrealized_profit_percent, wins, losses, trade_volume, trades, avg_trade_size, is_bot)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                ON DUPLICATE KEY UPDATE
-                                    gross_profit = VALUES(gross_profit),
-                                    win_rate = VALUES(win_rate),
-                                    realized_profit = VALUES(realized_profit),
-                                    unrealized_profit = VALUES(unrealized_profit),
-                                    realized_profit_percent = VALUES(realized_profit_percent),
-                                    unrealized_profit_percent = VALUES(unrealized_profit_percent),
-                                    wins = VALUES(wins),
-                                    losses = VALUES(losses),
-                                    trade_volume = VALUES(trade_volume),
-                                    trades = VALUES(trades),
-                                    avg_trade_size = VALUES(avg_trade_size),
-                                    is_bot = VALUES(is_bot)
-                            """, (wallet_address, token_address, gross_profit_value, win_rate_value, realized_profit_value, unrealized_profit_value, realized_profit_percent, unrealized_profit_percent, win_value, loss_value, trade_volume_value, trades_value, avg_trade_size_value, bot_tag is not None))
-                            sqldb.commit()
+
+                            if DB_WRITE:
+                                # save to MySQL if already exists update the parameters
+                                sql_cursor.execute("""
+                                    INSERT INTO traders (wallet_address, token_address, gross_profit, realized_profit, 
+                                    realized_profit_percent, unrealized_profit, unrealized_profit_percent, win_rate, wins, losses, 
+                                    trade_volume, trades, avg_trade_size, is_bot)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    """, (wallet_address, token_address, gross_profit_value, realized_profit_value,
+                                          realized_profit_percent, unrealized_profit_value, unrealized_profit_percent, win_rate_value,
+                                          win_value, loss_value, trade_volume_value, trades_value, avg_trade_size_value,
+                                          bot_tag is not None))
+                                sqldb.commit()
+
+                                
 
                     dprint(f"Extracted wallet data from {token_address}")
                     return token_address
